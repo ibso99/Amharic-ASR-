@@ -1,0 +1,160 @@
+__main__
+  └── main()
+        ├── build_arg_parser()
+        │     ├── registers data arguments
+        │     ├── registers model arguments
+        │     ├── registers preprocessing/filtering arguments
+        │     ├── registers training arguments
+        │     └── registers generation/evaluation arguments
+        │
+        ├── load_json_config(...) OR parse command-line arguments
+        │     ├── python whisper_main.py train_config.json
+        │     └── python whisper_main.py --config train_config.json ...
+        │
+        ├── apply_config_to_parser_defaults(...)
+        │     └── validates JSON keys against argparse destination names
+        │
+        ├── setup_logging(args.log_level)
+        ├── validate_args(args)
+        ├── set_seed(args.seed)
+        │
+        ├── load_local_manifest_datasets(...)
+        │     ├── load_and_validate_manifest(train_csv)
+        │     │     ├── read CSV manifest
+        │     │     ├── validate required columns
+        │     │     ├── validate audio paths
+        │     │     ├── check duration range
+        │     │     ├── normalize transcript text
+        │     │     └── save dropped-row report
+        │     │
+        │     ├── load_and_validate_manifest(eval_csv)
+        │     ├── load_and_validate_manifest(test_csv), if provided
+        │     ├── audit_transcripts(...)
+        │     ├── dataset_from_dataframe(train_df)
+        │     ├── dataset_from_dataframe(eval_df)
+        │     └── dataset_from_dataframe(test_df)
+        │
+        ├── make_sanity_overfit_dataset(...), if sanity_overfit=True
+        │
+        ├── create_processor(...)
+        │     └── WhisperProcessor.from_pretrained(...)
+        │           ├── WhisperFeatureExtractor
+        │           └── WhisperTokenizer
+        │
+        ├── preprocess_dataset(...)
+        │     ├── optional max_train/eval/test sample selection
+        │     ├── optional label-length audit
+        │     │     ├── processor.tokenizer(text).input_ids
+        │     │     ├── calculate label_length
+        │     │     └── mark valid_label_length
+        │     │
+        │     ├── filter labels longer than max_label_length
+        │     └── return lazy datasets
+        │
+        ├── create_model(...)
+        │     ├── WhisperForConditionalGeneration.from_pretrained(...)
+        │     ├── set forced_decoder_ids for Amharic transcription
+        │     ├── set generation language/task
+        │     ├── disable suppress_tokens
+        │     ├── optionally freeze Whisper conv front-end
+        │     ├── optionally freeze full encoder
+        │     ├── optionally enable gradient checkpointing
+        │     └── set model.config.use_cache=False
+        │
+        ├── Seq2SeqTrainingArguments(...)
+        │     ├── output_dir
+        │     ├── batch size / accumulation
+        │     ├── learning rate / warmup / weight decay
+        │     ├── fp16 / bf16
+        │     ├── eval_steps / save_steps / logging_steps
+        │     ├── predict_with_generate
+        │     ├── generation_max_length
+        │     ├── generation_num_beams
+        │     ├── load_best_model_at_end
+        │     ├── metric_for_best_model="wer"
+        │     ├── report_to=["tensorboard"]
+        │     └── remove_unused_columns=False
+        │
+        ├── save_training_config(...)
+        │     └── saves run_config.json
+        │
+        ├── create_trainer(...)
+        │     ├── DataCollatorSpeechSeq2SeqWithPadding(...)
+        │     │     └── lazy batch-time feature extraction
+        │     │
+        │     ├── compute_metrics(...)
+        │     │     ├── decode predictions
+        │     │     ├── decode labels
+        │     │     ├── normalize reference text
+        │     │     ├── normalize prediction text
+        │     │     ├── compute WER
+        │     │     ├── compute CER
+        │     │     └── compute character accuracy
+        │     │
+        │     ├── EarlyStoppingCallback(...)
+        │     └── Seq2SeqTrainer(...)
+        │           ├── uses data_collator.__call__(features)
+        │           ├── uses model(input_features, attention_mask, labels)
+        │           └── uses compute_metrics(pred), if predict_with_generate=True
+        │
+        ├── train_and_evaluate(...)
+        │     ├── trainer.train(...), if do_train=True
+        │     ├── trainer.save_model(...)
+        │     ├── trainer.evaluate(...), if do_eval=True
+        │     ├── trainer.predict(test_dataset), if do_predict_test=True
+        │     ├── processor.save_pretrained(final_model_dir)
+        │     └── model.save_pretrained(final_model_dir)
+        │
+        └── return results
+
+General Flow
+
+1. Read user settings from train_config.json or command-line arguments.
+
+2. Validate the configuration, paths, durations, batch sizes, and required CSV columns.
+
+3. Load local Amharic audio-text manifests for train, validation, and optionally test.
+
+4. Validate audio paths and remove bad rows, too-short clips, too-long clips, and empty or invalid transcripts.
+
+5. Normalize transcripts so training and evaluation use a consistent Amharic text standard.
+
+6. Convert validated CSV rows into Hugging Face DatasetDict objects.
+
+7. Load WhisperProcessor, which contains both the Whisper feature extractor and tokenizer.
+
+8. Filter transcript labels that exceed Whisper’s decoder limit, usually using max_label_length=440.
+
+9. Keep datasets in lazy mode, meaning log-Mel features are not precomputed for the full dataset.
+
+10. Load WhisperForConditionalGeneration from openai/whisper-small or from a previous checkpoint.
+
+11. Configure Whisper for Amharic transcription using forced decoder prompt IDs.
+
+12. Optionally freeze the encoder or front-end. For the current full fine-tuning workflow, these are not frozen.
+
+13. Enable gradient checkpointing to reduce GPU memory use.
+
+14. Build Seq2SeqTrainingArguments, including batch size, gradient accumulation, evaluation schedule, saving schedule, TensorBoard reporting, and generation settings.
+
+15. Create the custom data collator.
+
+16. During each batch, the collator loads audio from disk, resamples it to 16 kHz, converts it to Whisper log-Mel input features, tokenizes the transcript, pads audio and labels, and masks label padding with -100.
+
+17. Fine-tune Whisper using Seq2SeqTrainer.
+
+18. During evaluation, generate predicted transcripts using model.generate(...).
+
+19. Decode predictions and references back into text.
+
+20. Normalize both predictions and references before metric computation.
+
+21. Compute WER, CER, char_accuracy, and loss.
+
+22. Save checkpoints during training.
+
+23. Load the best checkpoint based on lowest WER.
+
+24. Save the final model and processor to final_model.
+
+25. Optionally run prediction on the test split.
